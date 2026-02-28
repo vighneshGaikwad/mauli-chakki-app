@@ -1,41 +1,33 @@
 const express = require('express')
 const multer = require('multer')
-const path = require('path')
+const { v2: cloudinary } = require('cloudinary')
 const { authMiddleware, adminOnly } = require('../middleware/auth')
 
 const router = express.Router()
 
 /*
- 🎓 LESSON: Handling File Uploads with Multer
+ 🎓 LESSON: Cloudinary for Image Hosting
  
- Multer is a middleware that handles multipart/form-data,
- which is specifically used for uploading files.
+ Instead of saving images to the server's disk (which gets
+ wiped on every deploy on free platforms like Render), we
+ upload them to Cloudinary — a free cloud image service.
  
- 1. We create a "storage" configuration to tell multer where
-    to save the files and what name to give them.
- 2. We use path.extname() to keep the original file extension (e.g. .jpg, .png)
+ Flow:
+ 1. Multer receives the file in memory (not saved to disk)
+ 2. We upload the buffer to Cloudinary
+ 3. Cloudinary returns a permanent URL
+ 4. We send that URL back to the frontend
 */
 
-const fs = require('fs')
-
-// Use absolute path so it works regardless of where the server is started from
-const uploadsDir = path.join(__dirname, '..', 'uploads')
-
-// Auto-create the uploads folder if it doesn't exist
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true })
-}
-
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, uploadsDir)
-    },
-    filename: function (req, file, cb) {
-        // Name the file securely using timestamp + random number to avoid collisions
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname))
-    }
+// Configure Cloudinary with credentials from .env
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
 })
+
+// Use memory storage instead of disk — file stays in RAM as a buffer
+const storage = multer.memoryStorage()
 
 // Only accept images
 const fileFilter = (req, file, cb) => {
@@ -54,19 +46,37 @@ const upload = multer({
     }
 })
 
+// Helper: Upload buffer to Cloudinary
+function uploadToCloudinary(fileBuffer, folder) {
+    return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            {
+                folder: folder || 'chakki-products',
+                resource_type: 'image',
+                transformation: [
+                    { width: 800, height: 800, crop: 'limit', quality: 'auto', format: 'webp' }
+                ]
+            },
+            (error, result) => {
+                if (error) reject(error)
+                else resolve(result)
+            }
+        )
+        stream.end(fileBuffer)
+    })
+}
+
 // POST /api/upload
 // We protect this route so only admins can upload images
 router.post('/', authMiddleware, adminOnly, (req, res) => {
-    upload.single('image')(req, res, (err) => {
+    upload.single('image')(req, res, async (err) => {
         if (err instanceof multer.MulterError) {
-            // Multer-specific errors (file too large, etc.)
             console.error('Multer Error:', err)
             if (err.code === 'LIMIT_FILE_SIZE') {
                 return res.status(400).json({ message: 'File too large. Max size is 15MB.' })
             }
             return res.status(400).json({ message: err.message })
         } else if (err) {
-            // Other errors (file filter rejection, etc.)
             console.error('Upload Error:', err)
             return res.status(400).json({ message: err.message || 'Failed to upload image' })
         }
@@ -75,9 +85,16 @@ router.post('/', authMiddleware, adminOnly, (req, res) => {
             return res.status(400).json({ message: 'No file uploaded' })
         }
 
-        // Return the URL to access this image
-        const imageUrl = `/uploads/${req.file.filename}`
-        res.json({ url: imageUrl, message: 'Image uploaded successfully' })
+        try {
+            // Upload to Cloudinary
+            const result = await uploadToCloudinary(req.file.buffer, 'chakki-products')
+            
+            // Return the Cloudinary URL (starts with https://)
+            res.json({ url: result.secure_url, message: 'Image uploaded successfully' })
+        } catch (uploadErr) {
+            console.error('Cloudinary Upload Error:', uploadErr)
+            res.status(500).json({ message: 'Failed to upload image to cloud storage' })
+        }
     })
 })
 
