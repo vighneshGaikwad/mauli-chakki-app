@@ -31,7 +31,7 @@ import { ordersAPI, getImageUrl } from '@/lib/api'
 */
 
 // 👇 This is the admin's WhatsApp number — messages go here
-const ADMIN_WHATSAPP = '918237866355' // Format: country code + number (no +)
+const ADMIN_WHATSAPP = '919372980575' // Format: country code + number (no +)
 
 export function CartDrawer() {
     const {
@@ -53,19 +53,7 @@ export function CartDrawer() {
         setCheckoutLoading(true)
 
         try {
-            // 1. Save order to database so history works
-            const orderItems = items.map((item) => ({
-                productId: item.id,
-                name: item.name,
-                grind: item.grind,
-                weightKg: item.weightKg,
-                pricePerKg: item.pricePerKg,
-                isSubscription: item.isSubscription || false,
-            }))
-
-            await ordersAPI.placeOrder(orderItems, totalPrice)
-
-            // 2. Format WhatsApp message
+            // 1. Format WhatsApp message first (so it always works)
             const now = new Date()
             const date = now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
             const time = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
@@ -105,16 +93,34 @@ export function CartDrawer() {
                 `_Please confirm availability and delivery details._`,
             ].join('\n')
 
-            // 3. Clear cart, open WhatsApp, redirect to My Orders
+            // 2. Open WhatsApp immediately (before API call, so it's not blocked)
             const encoded = encodeURIComponent(message)
-            window.open(`https://wa.me/${ADMIN_WHATSAPP}?text=${encoded}`, '_blank')
+            const whatsappUrl = `https://wa.me/${ADMIN_WHATSAPP}?text=${encoded}`
+            window.open(whatsappUrl, '_blank')
 
+            // 3. Save order to database (best-effort, doesn't block WhatsApp)
+            try {
+                const orderItems = items.map((item) => ({
+                    productId: item.id,
+                    name: item.name,
+                    grind: item.grind,
+                    weightKg: item.weightKg,
+                    pricePerKg: item.pricePerKg,
+                    isSubscription: item.isSubscription || false,
+                }))
+                await ordersAPI.placeOrder(orderItems, totalPrice)
+            } catch {
+                // Order save failed but WhatsApp message already sent — that's OK
+                console.warn('Order save to database failed, but WhatsApp message was sent.')
+            }
+
+            // 4. Clear cart and redirect to My Orders
             clearCart()
             setIsOpen(false)
             navigate('/my-orders')
 
         } catch (err: unknown) {
-            setCheckoutError(err instanceof Error ? err.message : 'Failed to save order. Please try again.')
+            setCheckoutError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
         } finally {
             setCheckoutLoading(false)
         }
